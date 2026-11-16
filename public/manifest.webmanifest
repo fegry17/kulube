@@ -1,0 +1,17 @@
+{
+  "name": "Kulübe",
+  "short_name": "Kulübe",
+  "description": "Arkadaşlarınla yazış, sesli konuş, yayın aç.",
+  "lang": "tr",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#14181b",
+  "theme_color": "#14181b",
+  "icons": [
+    { "src": "/simge/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/simge/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/simge/maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

@@ -1,0 +1,26 @@
+# Render "Blueprint" tanımı: bu dosya deponun kökünde durursa Render ayarları buradan okur.
+services:
+  - type: web
+    name: kulube
+    runtime: node
+    plan: free
+    buildCommand: npm install --omit=dev
+    startCommand: node server.js
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL   # Neon'dan aldığın bağlantı adresi; Render panelinden elle girilir
+        sync: false
+      # Uyanık tutma: arka uç Render'ın verdiği RENDER_EXTERNAL_URL adresine 10 dakikada bir istek atar ve servis uyumaz.
+      # Kapatmak için KEEPALIVE değerini "0" yap.
+      - key: KEEPALIVE
+        value: "1"
+      # Ağ engeli çözümü (Cloudflare TURN): Cloudflare panelinde oluşturulan TURN anahtarının kimliği ve API anahtarı.
+      # Render panelinden elle girilir; boş kalırsa sadece doğrudan bağlantı denenir.
+      - key: CF_TURN_KEY_ID
+        sync: false
+      - key: CF_TURN_API_TOKEN
+        sync: false
+      - key: YT_API_KEY   # isteğe bağlı: şarkıyı isimle arama için YouTube anahtarı (boş bırakılabilir)
+        sync: false
