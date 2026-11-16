@@ -331,6 +331,16 @@
   .tvol { position: absolute; right: 8px; bottom: 8px; display: flex; align-items: center; gap: 4px; background: rgba(0,0,0,.65); padding: 2px 8px; border-radius: 4px; font-size: 12px; cursor: default; }
   .tvol[hidden] { display: none; }
   .tvol input { width: 80px; padding: 0; border: 0; background: none; accent-color: var(--accent); }
+  .tfs { position: absolute; right: 8px; top: 8px; background: rgba(0,0,0,.65); color: #fff; border: 0; border-radius: 4px; padding: 4px 10px; font-size: 13px; cursor: pointer; opacity: .85; transition: opacity .2s; }
+  .tfs:hover { opacity: 1; background: rgba(0,0,0,.85); }
+  .tile:fullscreen { border-radius: 0; cursor: default; }
+  .tile:fullscreen .lbl, .tile:fullscreen .tvol, .tile:fullscreen .tfs { transition: opacity .3s; }
+  .tile:fullscreen.idle { cursor: none; }
+  .tile:fullscreen.idle .lbl, .tile:fullscreen.idle .tvol, .tile:fullscreen.idle .tfs { opacity: 0; pointer-events: none; }
+  .tile:fullscreen .lbl { font-size: 14px; left: 16px; bottom: 16px; }
+  .tile:fullscreen .tvol { right: 16px; bottom: 16px; font-size: 14px; }
+  .tile:fullscreen .tvol input { width: 140px; }
+  .tile:fullscreen .tfs { right: 16px; top: 16px; font-size: 14px; }
   #mResults { display: grid; gap: 4px; max-height: 280px; overflow-y: auto; }
   #mResults[hidden] { display: none; }
   #mResults button { display: flex; align-items: center; gap: 10px; text-align: left; padding: 4px 6px; border-radius: 6px; width: 100%; }
@@ -2128,6 +2138,27 @@ function stopCam(silent) {
   if (!silent) { socket.emit('voiceCam', null); render(); }
 }
 
+// --- Yayını tam ekran izleme: düğme, tıklama, Esc ile çıkış; tam ekranda fare durunca düğmeler ve imleç gizlenir ---
+function toggleFull(tile) {
+  if (document.fullscreenElement) { document.exitFullscreen().catch(() => {}); return; }
+  const go = tile.requestFullscreen || tile.webkitRequestFullscreen;
+  if (go) Promise.resolve(go.call(tile)).catch(() => toast('Tam ekran açılamadı'));
+}
+let fullIdleTimer = 0;
+function wakeTile(tile) {
+  tile.classList.remove('idle'); clearTimeout(fullIdleTimer);
+  if (document.fullscreenElement === tile) fullIdleTimer = setTimeout(() => tile.classList.add('idle'), 2500);
+}
+document.addEventListener('fullscreenchange', () => {
+  const f = document.fullscreenElement;
+  for (const t of tiles.values()) {
+    const b = t.el.querySelector('.tfs'); if (!b) continue;
+    const on = f === t.el; b.textContent = on ? '✕ Tam ekrandan çık (Esc)' : '⛶ Tam ekran';
+    if (!on) t.el.classList.remove('idle');
+  }
+  if (f && f.classList.contains('tile')) wakeTile(f);
+});
+
 function renderStage() {
   const want = new Map();
   if (screenStream) want.set('me', { stream: screenStream, label: 'Senin yayının', self: true });
@@ -2151,8 +2182,11 @@ function renderStage() {
     v.srcObject = w.stream; applySink(v); v.play().catch(() => {});
     const lbl = el('span', 'lbl', w.label);
     if (!w.cam) v.onresize = () => { lbl.textContent = w.label + ' · ' + v.videoWidth + '×' + v.videoHeight; };
-    tile.onclick = () => (document.fullscreenElement ? document.exitFullscreen() : tile.requestFullscreen().catch(() => {}));
-    tile.append(v, lbl);
+    tile.onclick = () => toggleFull(tile);
+    const fs = el('button', 'tfs', '⛶ Tam ekran'); fs.type = 'button';
+    fs.onclick = (e) => { e.stopPropagation(); toggleFull(tile); };
+    tile.onmousemove = () => wakeTile(tile);
+    tile.append(v, lbl, fs);
     if (!w.self && !w.cam) { // yayının sesi: kişiye özel ses düzeyi (sadece bende değişir)
       const key = 'yayin:' + w.label, box = el('label', 'tvol'), rng = el('input'); rng.type = 'range'; rng.min = 0; rng.max = 100;
       rng.value = Math.round((volumes[key] ?? 1) * 100); v.volume = Math.min(1, volumes[key] ?? 1);
