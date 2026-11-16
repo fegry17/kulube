@@ -116,7 +116,7 @@
   #top .hash { color: var(--dim); }
 
   /* Canlı yayın alanı */
-  #stage { display: flex; gap: 8px; padding: 8px; background: var(--stage); border-bottom: 1px solid var(--line); max-height: 62%; min-height: 0; flex: none; }
+  #stage { display: flex; justify-content: center; gap: 8px; padding: 8px; background: var(--stage); border-bottom: 1px solid var(--line); max-height: 62%; min-height: 0; flex: none; }
   #stage[hidden] { display: none; }
   .tile { position: relative; flex: 1; min-width: 0; background: #000; border-radius: 8px; overflow: hidden; display: grid; place-items: center; cursor: pointer; }
   .tile video { width: 100%; height: 100%; max-height: 58vh; object-fit: contain; display: block; }
@@ -266,7 +266,10 @@
   #banList { display: grid; gap: 6px; max-height: 200px; overflow-y: auto; }
   #banList div { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 14px; }
   #voicebar select { flex: 1; padding: 5px 6px; font-size: 12.5px; border-radius: 6px; background: var(--panel2); }
-  .tile.cam video { object-fit: cover; }
+  /* Kamera: kırpma yok, ekran genişliğine şişirilmez (düşük çözünürlüklü kamera büyütülünce kare kare görünür) */
+  .tile.cam { flex: 0 1 640px; max-width: 640px; aspect-ratio: 16 / 9; }
+  .tile.cam video { object-fit: contain; max-height: 100%; }
+  .tile.cam:fullscreen { max-width: none; aspect-ratio: auto; }
 
   /* Mesaj arama */
   #q { margin-left: auto; width: 210px; padding: 6px 10px; font-size: 13.5px; font-weight: 400; background: var(--panel2); }
@@ -1859,7 +1862,7 @@ const QUALS = {
 };
 if (!QUALS[cfg.q]) cfg.q = '1080p30';
 let SCREEN = QUALS[cfg.q];
-const CAM = { width: 1280, height: 720, fps: 30, maxBitrate: 1500000 };
+const CAM = { width: 1280, height: 720, fps: 30, maxBitrate: 2500000 };
 let camStream = null, voiceAcked = false;
 const peers = new Map();   // kullanıcı id -> { pc, audio, chain, polite, makingOffer, ignoreOffer, micSender, out, camSenders, streams, camStream, micStream }
 let localStream = null, screenStream = null, myVoice = null, muted = false, deaf = false;
@@ -2118,6 +2121,8 @@ async function startCam() {
   } catch { toast('Kameraya erişilemedi. Kamera takılı mı, izin verildi mi?'); return; }
   if (!myVoice) { s.getTracks().forEach((t) => t.stop()); return; }
   camStream = s;
+  // "detail": bağlantı zayıflarsa tarayıcı çözünürlüğü değil kare hızını düşürür (yüz kare kare olmaz)
+  try { s.getVideoTracks()[0].contentHint = 'detail'; } catch {}
   s.getVideoTracks()[0].onended = () => stopCam();
   socket.emit('voiceCam', s.id);
   for (const p of peers.values()) addCamTo(p);
@@ -2125,7 +2130,8 @@ async function startCam() {
 }
 function addCamTo(p) {
   p.camSenders = camStream.getTracks().map((t) => p.pc.addTrack(t, camStream));
-  p.camSenders.forEach((x) => tuneVideoSender(x, CAM, true));
+  // Kamerada da çözünürlük korunur: bağlantı zayıflarsa kare hızı düşer, görüntü kare kare olmaz
+  p.camSenders.forEach((x) => tuneVideoSender(x, CAM));
 }
 function stopCam(silent) {
   if (!camStream) return;
@@ -2181,7 +2187,7 @@ function renderStage() {
     const v = el('video'); v.autoplay = true; v.playsInline = true; v.muted = !!w.self || deaf || !!me.forceDeaf; v.dataset.self = w.self ? '1' : '';
     v.srcObject = w.stream; applySink(v); v.play().catch(() => {});
     const lbl = el('span', 'lbl', w.label);
-    if (!w.cam) v.onresize = () => { lbl.textContent = w.label + ' · ' + v.videoWidth + '×' + v.videoHeight; };
+    v.onresize = () => { lbl.textContent = w.label + ' · ' + v.videoWidth + '×' + v.videoHeight; };
     tile.onclick = () => toggleFull(tile);
     const fs = el('button', 'tfs', '⛶ Tam ekran'); fs.type = 'button';
     fs.onclick = (e) => { e.stopPropagation(); toggleFull(tile); };
