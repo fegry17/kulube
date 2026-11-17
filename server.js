@@ -468,6 +468,47 @@ async function getIce() {
   return [STUN];
 }
 
+// ---- Aktarma (TURN) kullanım sayacı: sadece barındırmanın sahibi görür ----
+// Cloudflare yalnızca Cloudflare'den kişiye giden veriyi (egress) ücretlendirir: ayda 1000 GB ücretsiz, sonrası 0,05 $/GB.
+// Gerekli: CF_ACCOUNT_ID (Cloudflare hesap kimliği) ve CF_ANALYTICS_TOKEN ("Account Analytics: Read" izinli API anahtarı).
+// Kim görür: SAYAC_SUNUCU (virgülle davet kodları) ortam değişkenindeki sunucuların kurucusu; yoksa en eski sunucunun kurucusu.
+let usageCache = null;
+function usageViewer(code, isAdmin) {
+  if (!isAdmin) return false;
+  const list = String(process.env.SAYAC_SUNUCU || '').split(',').map((x) => x.trim().toLowerCase()).filter(Boolean);
+  if (list.length) return list.includes(code);
+  let oldest = null;
+  for (const [c, s] of Object.entries(data.servers)) if (!oldest || (s.created || 0) < (data.servers[oldest].created || 0)) oldest = c;
+  return oldest === code;
+}
+async function turnUsage() {
+  const acc = String(process.env.CF_ACCOUNT_ID || '').trim(), tok = String(process.env.CF_ANALYTICS_TOKEN || '').trim();
+  const turnOn = !!(process.env.CF_TURN_KEY_ID && process.env.CF_TURN_API_TOKEN);
+  if (!acc || !tok) return { setup: false, turnOn };
+  if (!/^[0-9a-f]{32}$/i.test(acc)) return { setup: true, turnOn, error: 'CF_ACCOUNT_ID biçimi yanlış (32 karakterlik hesap kimliği olmalı).' };
+  if (usageCache && Date.now() - usageCache.at < 60000) return usageCache.v;
+  const now = new Date(), from = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString().slice(0, 10), to = now.toISOString().slice(0, 10);
+  // Hesaptaki tüm TURN kullanımı (fatura da hesap bazında; hesapta tek TURN anahtarı var)
+  const query = `query { viewer { accounts(filter: { accountTag: "${acc}" }) { callsTurnUsageAdaptiveGroups(limit: 10000, filter: { date_geq: "${from}", date_leq: "${to}" }) { sum { egressBytes ingressBytes } } } } }`;
+  try {
+    const r = await fetch('https://api.cloudflare.com/client/v4/graphql', {
+      method: 'POST', headers: { Authorization: 'Bearer ' + tok, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query }), signal: AbortSignal.timeout(8000),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok || (d.errors && d.errors.length)) {
+      const msg = (d.errors && d.errors[0] && d.errors[0].message) || ('HTTP ' + r.status);
+      console.error('kullanim sayaci:', msg);
+      return { setup: true, turnOn, error: /auth|permission|token/i.test(msg) ? 'Cloudflare anahtarı reddedildi: "Account Analytics: Read" izni olmalı.' : 'Cloudflare yanıt vermedi: ' + msg.slice(0, 120) };
+    }
+    let egress = 0, ingress = 0;
+    for (const a of (d.data && d.data.viewer && d.data.viewer.accounts) || []) for (const g of a.callsTurnUsageAdaptiveGroups || []) { egress += Number(g.sum && g.sum.egressBytes) || 0; ingress += Number(g.sum && g.sum.ingressBytes) || 0; }
+    const v = { setup: true, turnOn, from, to, egress, ingress, freeBytes: 1000 * 1e9, at: Date.now() };
+    usageCache = { at: Date.now(), v };
+    return v;
+  } catch (e) { return { setup: true, turnOn, error: 'Cloudflare\'e ulaşılamadı: ' + e.message }; }
+}
+
 // ---- Çevrimiçi kullanıcılar ----
 const users = new Map(); // socket.id -> kullanıcı (server alanı hangi sunucuda olduğunu söyler)
 const COLORS = ['#f2a65a', '#6fcfb0', '#e88fb4', '#8fb8f0', '#d7c35a', '#b79cf0', '#f08a7a', '#7fd0e0'];
@@ -626,7 +667,7 @@ function relayPlan(online) {
   const plan = {};
   for (const s of online) {
     if (!s.screen || !s.voice) continue;
-    const viewers = online.filter((u) => u.voice === s.voice && u.id !== s.id)
+    const viewers = online.filter((u) => u.voice === s.voice && u.id !== s.id && !u.away) // pencereyi arkaya atan (oyundaki) izlemez
       .sort((a, b) => (voiceTs.get(a.id) || 0) - (voiceTs.get(b.id) || 0) || (a.id < b.id ? -1 : 1));
     const parents = {}, queue = [{ id: s.id, cap: ROOT }];
     let qi = 0;
@@ -700,7 +741,7 @@ io.on('connection', (socket) => {
   // activity: "şu an oynuyor" yazısı.  rec: ses kaydı yapıyor (kanaldakiler görsün diye).  roles: özel rol kimlikleri
   const user = { id: socket.id, uid, server: code, name: socket.data.name, color: colorOf(srv, member, socket.data.name), admin: socket.data.admin,
     role: roleOf(srv, member, socket.data.admin), roles: (member && member.roles) || [], perms: permsOf(srv, member, roleOf(srv, member, socket.data.admin)), av: (member && member.av) || null, status: 'online', activity: '',
-    voice: null, muted: false, deaf: false, forceMuted: false, forceDeaf: false, screen: null, screenQ: null, cam: null, rec: false };
+    voice: null, muted: false, deaf: false, forceMuted: false, forceDeaf: false, screen: null, screenQ: null, cam: null, rec: false, away: false };
   users.set(socket.id, user);
   const token = crypto.randomBytes(16).toString('hex');
   tokens.set(token, socket.id);
@@ -766,6 +807,11 @@ io.on('connection', (socket) => {
     if (typeof cb === 'function') cb(publicUrl);
   });
   socket.on('ice', async (cb) => { if (typeof cb === 'function') cb(await getIce()); });
+  // Aktarma kullanım sayacı: yetkisiz kişiye "izin yok" bile denmez, sadece null döner (sayaç görünmez)
+  socket.on('turnUsage', async (cb) => {
+    if (typeof cb !== 'function') return;
+    cb(usageViewer(code, socket.data.admin) ? await turnUsage() : null);
+  });
   socket.on('pingme', (cb) => { if (typeof cb === 'function') cb(Date.now()); }); // bağlantı testi: gidiş-dönüş süresi
   const log = (act, target, detail) => audit(code, user, act, target, detail);
 
@@ -1085,6 +1131,8 @@ io.on('connection', (socket) => {
 
   socket.on('voiceMute', (muted) => { user.muted = !!muted; update(); });
   socket.on('voiceDeaf', (deaf) => { user.deaf = !!deaf; update(); });
+  // Kulübe penceresi arkada (oyun oynuyor): yayınları almasın, aktarmasın — görüntü çözmek oyunu kasar
+  socket.on('voiceAway', (away) => { if (user.away === !!away) return; user.away = !!away; update(); });
 
   socket.on('voiceScreen', (streamId, q) => {
     if (!user.voice) return;
