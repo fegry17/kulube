@@ -166,6 +166,9 @@
   #set .ghostb:hover { border-color: var(--dim); }
   #set .ghostb.on { background: var(--ok); color: #08261d; border-color: var(--ok); }
   .meter { height: 10px; background: var(--bg); border: 1px solid var(--line); border-radius: 5px; overflow: hidden; }
+  #usageBar { height: 100%; width: 0; background: var(--ok); transition: width .3s; }
+  #usageBar.warn { background: #d7c35a; } #usageBar.bad { background: var(--bad); }
+  .usageNum { margin: 6px 0 0; font-size: 15px; font-weight: 600; }
   #meterBar { height: 100%; width: 0; background: var(--ok); transition: width .08s; }
 
   /* Profil resmi, durum, roller */
@@ -723,6 +726,14 @@
     <button id="btnBeep" class="ghostb" type="button">Test sesi çal</button>
     <label class="chk"><input type="checkbox" id="chkNs"> Gürültü engelleme</label>
     <label class="chk"><input type="checkbox" id="chkRnn"> Gelişmiş gürültü engelleme (klavye, fan, arka plan sesleri)</label>
+    <label for="selGate">Nefes ve hafif sesleri kes (ses eşiği)</label>
+    <select id="selGate">
+      <option value="kapali">Kapalı</option>
+      <option value="hafif">Hafif</option>
+      <option value="orta">Orta (önerilen)</option>
+      <option value="guclu">Güçlü</option>
+    </select>
+    <p class="hint">Mikrofon sadece konuşunca açılır; nefes, üfleme, hışırtı karşıya gitmez. Kelime başların kesiliyorsa "Hafif" seç. Denemek için yukarıdaki çubuğa bak: nefes alınca kıpırdamamalı.</p>
     <label for="selCam">Kamera</label>
     <select id="selCam"></select>
 
@@ -746,6 +757,7 @@
     <label class="chk"><input type="checkbox" id="chkDesk"> Masaüstü bildirimi göster</label>
     <label class="chk"><input type="checkbox" id="chkMen"> Sadece etiketlendiğimde ve özel mesajda bildir</label>
     <label class="chk"><input type="checkbox" id="chkVoiceSnd"> Ses kanalına biri girince / çıkınca ses çal</label>
+    <label class="chk"><input type="checkbox" id="chkToggleSnd"> Mikrofonu / kulaklığı açıp kapatınca ses çal</label>
 
     <h4>Görünüm</h4>
     <label for="selTheme">Tema</label>
@@ -763,6 +775,13 @@
       <option value="mor">Mor</option>
     </select>
     <button id="btnInstall" class="ghostb" type="button" hidden>📲 Ana ekrana ekle (uygulama gibi açılsın)</button>
+    <div id="usageBox" hidden>
+      <h4>Aktarma kullanımı (sadece sen görüyorsun)</h4>
+      <div class="meter usage"><div id="usageBar"></div></div>
+      <p id="usageText" class="usageNum"></p>
+      <p class="hint" id="usageHint"></p>
+      <button id="usageRefresh" class="ghostb" type="button">Yenile</button>
+    </div>
     <div class="row"><button id="setClose" class="btn" type="button">Kapat</button></div>
   </div>
 </dialog>
@@ -888,6 +907,7 @@ function connect(code, key) {
   sock.on('init', (d) => {
     const switched = active !== d.code || !joined;
     joined = true;
+    awaySent = false; setTimeout(syncAway, 0); // yeni bağlantıda sunucu "burada" sayar; pencere hâlâ arkadaysa yeniden bildir
     me = d.me; active = d.code; upToken = d.upToken || ''; maxFile = d.maxFile || maxFile;
     upsertServer(d.code, d.name, key);
     setState(d); saveServers();
@@ -1696,7 +1716,7 @@ $('#box').addEventListener('input', updateMention);
 $('#box').addEventListener('blur', () => setTimeout(hideMention, 150));
 
 // --- Bildirimler: ses, masaüstü bildirimi, başlıkta / uygulama simgesinde okunmamış sayısı ---
-const ncfg = Object.assign({ sound: true, desktop: true, onlyMention: false, voiceSounds: true }, JSON.parse(localStorage.getItem('kulube-bildirim') || '{}'));
+const ncfg = Object.assign({ sound: true, desktop: true, onlyMention: false, voiceSounds: true, toggleSounds: true }, JSON.parse(localStorage.getItem('kulube-bildirim') || '{}'));
 function updateBadge() {
   let n = 0;
   for (const u of unread.values()) n += u.mention;
@@ -1727,6 +1747,23 @@ function chime(up) {
       g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.18, t + 0.015); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.14);
       o.start(t); o.stop(t + 0.15);
     });
+  } catch {}
+}
+// Mikrofon / kulaklık aç-kapa sesi (sadece sen duyarsın; kulaklığı kapatırken de duyulur ki kapandığını anla)
+// Kapatma: alçalan notalar, açma: yükselen. Kulaklık daha kalın ve üç notalı, mikrofonla karışmasın.
+const CUES = { micOff: [[740, 0], [494, 0.075]], micOn: [[494, 0], [740, 0.075]], deafOff: [[523, 0], [392, 0.07], [262, 0.14]], deafOn: [[262, 0], [392, 0.07], [523, 0.14]] };
+window.__cues = []; // otomatik deneme için
+function cue(kind) {
+  if (!ncfg.toggleSounds || !CUES[kind]) return;
+  window.__cues.push(kind);
+  try {
+    const ctx = ensureCtx(); if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+    for (const [f, d] of CUES[kind]) {
+      const o = ctx.createOscillator(), g = ctx.createGain(), t = ctx.currentTime + d;
+      o.type = 'sine'; o.frequency.value = f; o.connect(g); g.connect(ctx.destination);
+      g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.2, t + 0.01); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.11);
+      o.start(t); o.stop(t + 0.12);
+    }
   } catch {}
 }
 let voiceSet = null; // ses kanalımdaki diğer kişiler (kim girdi, kim çıktı anlamak için)
@@ -1772,7 +1809,7 @@ function renderTyping() {
 setInterval(renderTyping, 1000);
 
 // ---------- Ses ayarları ----------
-const cfg = Object.assign({ rnn: true, overlay: false, kOverlay: '', game: true, mediaVol: 0.5, mediaAudio: false, mic: '', spk: '', cam: '', ns: true, q: '1080p30', ptt: false, pttKey: '', kMute: '', kDeaf: '', sfxVol: 0.6, sfxOn: true }, JSON.parse(localStorage.getItem('kulube-ses') || '{}'));
+const cfg = Object.assign({ rnn: true, gate: 'orta', overlay: false, kOverlay: '', game: true, mediaVol: 0.5, mediaAudio: false, mic: '', spk: '', cam: '', ns: true, q: '1080p30', ptt: false, pttKey: '', kMute: '', kDeaf: '', sfxVol: 0.6, sfxOn: true }, JSON.parse(localStorage.getItem('kulube-ses') || '{}'));
 let pttDown = false; // bas-konuş tuşu şu an basılı mı
 const saveCfg = () => localStorage.setItem('kulube-ses', JSON.stringify(cfg));
 
@@ -1789,22 +1826,115 @@ async function rawMic() {
 // Mikrofon → 48 kHz ses hattı → RNNoise → temizlenmiş akış. Ses bilgisayardan çıkmadan, burada işlenir.
 // Dönen akışta _raw (asıl mikrofon) ve _ns (ses hattı) durur; kapatırken stopStream() hepsini kapatır.
 let nsLib = null, nsWasm = null, nsWarned = false;
+// Ses eşiği işlemcisi (nefes ve hafif sesleri keser); ayrı dosya yerine buradan Blob olarak yüklenir
+const ESIK_SRC = `// Ses eşiği (nefes / hafif ses kesici) — AudioWorklet işlemcisi. index.html bunu Blob olarak yükler.
+// Her 10 ms'de son 30 ms'lik ses için iki şey ölçülür:
+//  - ses düzeyi (dB), ortam gürültüsüne göre
+//  - perdelilik: sesli harflerde ses telleri titreşir, dalga kendini düzenli aralıkla (80–400 Hz) tekrar eder;
+//    nefes, hışırtı, üfleme ise gürültüdür, tekrar etmez. (Normalize öz-ilinti, 12 kHz'e indirilmiş sinyalde.)
+// Kapı ancak "yeterince yüksek VE perdeli" ses gelince açılır; açıkken konuşma sürdükçe (s, ş, f dahil) açık kalır,
+// sessizlikte 350 ms bekleyip yumuşakça kapanır.
+class KulubeEsik extends AudioWorkletProcessor {
+  constructor(opts) {
+    super();
+    this.set((opts && opts.processorOptions) || {});
+    const sr = sampleRate;
+    this.dec = Math.max(1, Math.round(sr / 12000)); this.dsr = sr / this.dec;
+    this.buf = new Float32Array(Math.round(this.dsr * 0.03)); this.bi = 0; this.bfill = 0;
+    this.lagMin = Math.round(this.dsr / 400); this.lagMax = Math.round(this.dsr / 80);
+    this.win = Math.round(sr * 0.01);
+    this.att = 1 - Math.exp(-1 / (sr * 0.003));
+    this.rel = 1 - Math.exp(-1 / (sr * 0.06));
+    this.holdN = 35;
+    this.hpA = Math.exp(-2 * Math.PI * 70 / sr); this.hpX = 0; this.hpY = 0; // 70 Hz yüksek geçiren (üfleme gümbürtüsü)
+    this.lp = 0; this.dc = 0;
+    this.floor = -70; this.acc = 0; this.n = 0;
+    this.open = false; this.holdLeft = 0; this.gain = 0;
+    this.port.onmessage = (e) => this.set(e.data || {});
+  }
+  set(o) {
+    const P = { hafif: [6, 0.35, -64], orta: [10, 0.45, -60], guclu: [14, 0.55, -54] };
+    const p = P[o.level] || P.orta;
+    this.offset = p[0]; this.rLimit = p[1]; this.minThr = p[2];
+  }
+  pitchiness() {
+    const b = this.buf, N = b.length, s = this.bi; // halka arabellek: en eski örnek s'de
+    const x = this.lin || (this.lin = new Float32Array(N));
+    for (let i = 0; i < N; i++) x[i] = b[(s + i) % N];
+    let best = 0;
+    for (let L = this.lagMin; L <= this.lagMax; L++) {
+      let xy = 0, xx = 0, yy = 0;
+      for (let i = 0; i + L < N; i++) { const a = x[i], c = x[i + L]; xy += a * c; xx += a * a; yy += c * c; }
+      const r = xy / Math.sqrt(xx * yy + 1e-20);
+      if (r > best) best = r;
+    }
+    return best;
+  }
+  decide() {
+    const db = 10 * Math.log10(this.acc / this.n + 1e-12);
+    if (db < this.floor) this.floor = db; else this.floor = Math.min(this.floor + 0.03, -35);
+    const thr = Math.max(this.floor + this.offset, this.minThr);
+    let voiced = false;
+    if (db > thr && this.bfill >= this.buf.length) voiced = this.pitchiness() > this.rLimit;
+    const veryLoud = db > -16; // bağırma, kahkaha: tınıya bakmadan aç
+    if (voiced || veryLoud) { this.open = true; this.holdLeft = this.holdN; }
+    else if (this.open && db > thr - 4) this.holdLeft = Math.max(this.holdLeft, 15);
+    else if (this.holdLeft > 0) this.holdLeft--;
+    if (this.holdLeft <= 0) this.open = false;
+    this.r = voiced; this.acc = 0; this.n = 0;
+  }
+  process(inputs, outputs) {
+    const inp = inputs[0] && inputs[0][0], out = outputs[0] && outputs[0][0];
+    if (!out) return true;
+    if (!inp) { out.fill(0); return true; }
+    for (let i = 0; i < inp.length; i++) {
+      const x = inp[i];
+      const h = this.hpA * (this.hpY + x - this.hpX); this.hpX = x; this.hpY = h; // yüksek geçiren
+      this.acc += h * h;
+      // 12 kHz'e indir + ön vurgu (kalın gümbürtünün "sahte perdesini" siler; sesli harflerin harmonikleri kalır)
+      this.lp += h; if (++this.dc >= this.dec) { const d = this.lp / this.dec; this.buf[this.bi] = d - 0.92 * (this.pd || 0); this.pd = d; this.bi = (this.bi + 1) % this.buf.length; if (this.bfill < this.buf.length) this.bfill++; this.lp = 0; this.dc = 0; }
+      if (++this.n >= this.win) this.decide();
+      const target = this.open ? 1 : 0;
+      this.gain += (target - this.gain) * (target > this.gain ? this.att : this.rel);
+      out[i] = x * this.gain;
+    }
+    for (let c = 1; c < outputs[0].length; c++) outputs[0][c].set(out);
+    return true;
+  }
+}
+registerProcessor('kulube-esik', KulubeEsik);`;
+let esikUrl = null;
+// Mikrofon → [RNNoise] → [ses eşiği] → akış. İkisi de kapalıysa mikrofon olduğu gibi kullanılır.
 async function denoise(raw) {
-  nsLib = nsLib || await import('/gurultu/index.js');
-  nsWasm = nsWasm || await nsLib.loadRnnoise({ url: '/gurultu/rnnoise.wasm', simdUrl: '/gurultu/rnnoise_simd.wasm' });
+  const useRnn = cfg.rnn, useGate = cfg.gate !== 'kapali';
+  if (useRnn) {
+    nsLib = nsLib || await import('/gurultu/index.js');
+    nsWasm = nsWasm || await nsLib.loadRnnoise({ url: '/gurultu/rnnoise.wasm', simdUrl: '/gurultu/rnnoise_simd.wasm' });
+  }
   const ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000, latencyHint: 'interactive' });
   try {
-    await ctx.audioWorklet.addModule('/gurultu/rnnoise-worklet.js');
-    const src = ctx.createMediaStreamSource(raw), node = new nsLib.RnnoiseWorkletNode(ctx, { wasmBinary: nsWasm, maxChannels: 1 }), dst = ctx.createMediaStreamDestination();
-    src.connect(node); node.connect(dst);
+    const src = ctx.createMediaStreamSource(raw), dst = ctx.createMediaStreamDestination();
+    let last = src, node = null, gate = null;
+    if (useRnn) {
+      await ctx.audioWorklet.addModule('/gurultu/rnnoise-worklet.js');
+      node = new nsLib.RnnoiseWorkletNode(ctx, { wasmBinary: nsWasm, maxChannels: 1 });
+      last.connect(node); last = node;
+    }
+    if (useGate) {
+      esikUrl ||= URL.createObjectURL(new Blob([ESIK_SRC], { type: 'text/javascript' }));
+      await ctx.audioWorklet.addModule(esikUrl);
+      gate = new AudioWorkletNode(ctx, 'kulube-esik', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1], processorOptions: { level: cfg.gate } });
+      last.connect(gate); last = gate;
+    }
+    last.connect(dst);
     await ctx.resume();
-    const out = dst.stream; out._raw = raw; out._ns = { ctx, node };
+    const out = dst.stream; out._raw = raw; out._ns = { ctx, node, gate };
     return out;
   } catch (err) { ctx.close().catch(() => {}); throw err; }
 }
 async function getMic() {
   const raw = await rawMic();
-  if (!cfg.rnn) return raw;
+  if (!cfg.rnn && cfg.gate === 'kapali') return raw;
   try { return await denoise(raw); }
   catch (err) { console.warn('gürültü engelleme açılamadı', err); if (!nsWarned) { nsWarned = true; toast('Gelişmiş gürültü engelleme açılamadı; mikrofon normal haliyle kullanılıyor.'); } return raw; }
 }
@@ -1812,7 +1942,7 @@ function stopStream(s) {
   if (!s) return;
   s.getTracks().forEach((t) => t.stop());
   if (s._raw) s._raw.getTracks().forEach((t) => t.stop());
-  if (s._ns) { try { s._ns.node.destroy(); } catch {} s._ns.ctx.close().catch(() => {}); }
+  if (s._ns) { try { s._ns.node && s._ns.node.destroy(); } catch {} s._ns.ctx.close().catch(() => {}); }
 }
 function applySink(media) { if (cfg.spk && media.setSinkId) media.setSinkId(cfg.spk).catch(() => {}); }
 function ensureCtx() {
@@ -2237,6 +2367,7 @@ setInterval(() => {
 // --- Gecikme ölçümü: ağ gidiş süresi + alıcı tamponu ---
 setInterval(async () => {
   if (!myVoice || !peers.size) { $('#vbLag').textContent = ''; return; }
+  if (document.hidden) return; // pencere arkadayken ölçmeye gerek yok (oyunda boşuna iş yapmasın)
   let worst = null;
   for (const p of peers.values()) {
     try {
@@ -2260,11 +2391,13 @@ $('#btnMute').onclick = () => {
   if (me.forceMuted) { toast('Mikrofonunu yönetici kapattı; sadece yönetici açabilir.'); return; }
   muted = !muted;
   socket.emit('voiceMute', muted); applyAudio(); renderVoiceBar();
+  cue(muted ? 'micOff' : 'micOn');
 };
 $('#btnDeaf').onclick = () => {
   if (me.forceDeaf) { toast('Kulaklığını yönetici kapattı; sadece yönetici açabilir.'); return; }
   deaf = !deaf;
   socket.emit('voiceDeaf', deaf); applyAudio(); renderVoiceBar();
+  cue(deaf ? 'deafOff' : 'deafOn');
 };
 
 // ---------- Ses efekt panosu ----------
@@ -2604,7 +2737,7 @@ function renderMedia() {
 setInterval(() => {
   if (!mediaSt || !mediaSt.cur) return;
   syncMedia();
-  if (!player || $('#media').hidden) return;
+  if (!player || $('#media').hidden || document.hidden) return;
   const d = player.duration(), t = Math.min(mediaWant(), d || Infinity);
   $('#mTime').textContent = clock(t) + (d ? ' / ' + clock(d) : '');
   if (!seeking && d) $('#mSeek').value = Math.round((t / d) * 1000);
@@ -2846,17 +2979,44 @@ syncGame();
 let testStream = null, ownsTest = false;
 const monitor = new Audio(); monitor.autoplay = true;
 
+// Aktarma (Cloudflare TURN) kullanım sayacı: sunucu sadece barındırmanın sahibine veri döner, başkasında kutu hiç görünmez
+const fmtGB = (b) => (b / 1e9).toLocaleString('tr-TR', { maximumFractionDigits: b < 1e10 ? 2 : 1 }) + ' GB';
+function loadUsage() {
+  if (!socket || !socket.connected) return;
+  $('#usageRefresh').disabled = true;
+  socket.emit('turnUsage', (u) => {
+    $('#usageRefresh').disabled = false;
+    $('#usageBox').hidden = !u;
+    if (!u) return;
+    const bar = $('#usageBar'); bar.className = ''; bar.style.width = '0';
+    if (!u.setup) {
+      $('#usageText').textContent = 'Sayaç kurulmadı';
+      $('#usageHint').textContent = 'Render\'a CF_ACCOUNT_ID ve CF_ANALYTICS_TOKEN eklenince bu ayki kullanım burada görünür.' + (u.turnOn ? '' : ' (Aktarma sunucusu da henüz eklenmemiş.)');
+      return;
+    }
+    if (u.error) { $('#usageText').textContent = 'Kullanım okunamadı'; $('#usageHint').textContent = u.error; return; }
+    const pct = Math.min(100, (100 * u.egress) / u.freeBytes), over = Math.max(0, u.egress - u.freeBytes);
+    bar.style.width = Math.max(pct, u.egress ? 1 : 0) + '%'; bar.classList.toggle('warn', pct >= 70 && pct < 90); bar.classList.toggle('bad', pct >= 90);
+    $('#usageText').textContent = fmtGB(u.egress) + ' / 1.000 GB ücretsiz';
+    $('#usageHint').textContent = 'Bu ay (' + u.from.split('-').reverse().join('.') + ' – bugün). Sadece aktarma sunucusundan geçen veri sayılır; doğrudan bağlanan arkadaşlar sayaca girmez. '
+      + (over ? 'Ücretsiz sınır aşıldı: fazlası yaklaşık ' + (over / 1e9 * 0.05).toLocaleString('tr-TR', { style: 'currency', currency: 'USD' }) + '.' : 'Kalan: ' + fmtGB(u.freeBytes - u.egress) + '.')
+      + ' Cloudflare kayıtları yaklaşık 1 dakika geriden gelir.';
+  });
+}
+$('#usageRefresh').onclick = loadUsage;
+
 async function openSettings() {
-  $('#chkNs').checked = cfg.ns; $('#chkRnn').checked = cfg.rnn;
+  $('#chkNs').checked = cfg.ns; $('#chkRnn').checked = cfg.rnn; $('#selGate').value = cfg.gate;
   $('#overlayRow').hidden = !(window.kulubeApp && window.kulubeApp.setOverlay); $('#chkOverlay').checked = cfg.overlay;
   $('#chkPtt').checked = cfg.ptt;
   $('#chkSnd').checked = ncfg.sound; $('#chkMen').checked = ncfg.onlyMention;
   $('#gameRow').hidden = !(window.kulubeApp && window.kulubeApp.setGameDetect); $('#chkGame').checked = cfg.game;
   $('#chkDesk').checked = ncfg.desktop && 'Notification' in window && Notification.permission === 'granted';
-  $('#chkVoiceSnd').checked = ncfg.voiceSounds;
+  $('#chkVoiceSnd').checked = ncfg.voiceSounds; $('#chkToggleSnd').checked = ncfg.toggleSounds;
   $('#selTheme').value = tcfg.theme; $('#selAccent').value = tcfg.accent;
   renderKeys();
   $('#set').showModal();
+  loadUsage();
   if (!navigator.mediaDevices?.getUserMedia) { $('#micHint').textContent = 'Ses testi için sayfa https veya localhost üzerinden açılmalı.'; return; }
   await startTest();
   await fillDevices();
@@ -2910,6 +3070,12 @@ $('#selMic').onchange = () => { cfg.mic = $('#selMic').value; micChanged(); };
 $('#chkNs').onchange = () => { cfg.ns = $('#chkNs').checked; micChanged(); };
 $('#chkOverlay').onchange = () => { cfg.overlay = $('#chkOverlay').checked; saveCfg(); syncOverlay(); };
 $('#chkRnn').onchange = () => { cfg.rnn = $('#chkRnn').checked; nsWarned = false; micChanged(); };
+$('#selGate').onchange = () => {
+  const was = cfg.gate; cfg.gate = $('#selGate').value; saveCfg();
+  // düzey değiştiyse çalışan hatta anında uygula; açıp kapatınca hat yeniden kurulur
+  if (was !== 'kapali' && cfg.gate !== 'kapali') { for (const s of [localStream, testStream]) if (s && s._ns && s._ns.gate) s._ns.gate.port.postMessage({ level: cfg.gate }); }
+  else { nsWarned = false; micChanged(); }
+};
 $('#selSpk').onchange = () => {
   cfg.spk = $('#selSpk').value; saveCfg();
   const sink = (m) => m.setSinkId && m.setSinkId(cfg.spk || '').catch(() => {});
@@ -2950,6 +3116,7 @@ const saveN = () => localStorage.setItem('kulube-bildirim', JSON.stringify(ncfg)
 $('#chkSnd').onchange = () => { ncfg.sound = $('#chkSnd').checked; saveN(); if (ncfg.sound) ping(false); };
 $('#chkMen').onchange = () => { ncfg.onlyMention = $('#chkMen').checked; saveN(); };
 $('#chkVoiceSnd').onchange = () => { ncfg.voiceSounds = $('#chkVoiceSnd').checked; saveN(); if (ncfg.voiceSounds) chime(true); };
+$('#chkToggleSnd').onchange = () => { ncfg.toggleSounds = $('#chkToggleSnd').checked; saveN(); if (ncfg.toggleSounds) cue('micOn'); };
 
 // --- Görünüm: tema ve vurgu rengi (bu cihazda saklanır) ---
 const tcfg = Object.assign({ theme: '', accent: '' }, JSON.parse(localStorage.getItem('kulube-tema') || '{}'));
@@ -3008,7 +3175,7 @@ function renderKeys() {
   $('#keyHint').textContent = 'Değiştirmek için düğmeye tıkla, sonra tuşa bas (silmek için Esc). '
     + (!app ? 'Bas-konuş tuşu bu sekme öndeyken çalışır; oyundayken de çalışması için masaüstü uygulamasını kullan.'
       : cfg.ptt && cfg.pttKey && !globalPtt ? 'Bu bas-konuş tuşu oyun içinde algılanamıyor, sadece Kulübe öndeyken çalışır; başka bir tuş seç.'
-      : 'Bas-konuş tuşu oyundayken de çalışır. Mikrofon ve kulaklık kısayolları da (Ctrl/Alt ile birlikte ya da F tuşu seçersen) her yerden çalışır.');
+      : 'Bas-konuş tuşu ve mikrofon / kulaklık kısayolları Kulübe arka plandayken ve oyundayken de çalışır.');
 }
 function setKey(name, value) {
   for (const k of ['pttKey', 'kMute', 'kDeaf', 'kOverlay']) if (k !== name && value && cfg[k] === value) cfg[k] = ''; // aynı tuş iki işe atanmasın
@@ -3140,6 +3307,21 @@ async function keepAwake(on) {
   } catch { wakeLock = null; }
 }
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && myVoice) keepAwake(true); });
+
+// --- Oyun oynarken kasmasın: pencere arkadayken yayın görüntüsü alınmaz ---
+// Kulübe simge durumundayken ya da oyun üstünü kapatınca, arkadaşların yayınlarını çözmek ekran kartını ve işlemciyi oyundan çalar.
+// 8 sn arkada kalınca sunucuya "izlemiyorum" denir; yayın planından çıkarız (ne alırız ne aktarırız). Pencere öne gelince hemen geri alınır.
+// Ses (konuşma) etkilenmez; sadece yayın görüntüsü ve yayının oyun sesi durur.
+let awayTimer = 0, awaySent = false;
+function syncAway() {
+  clearTimeout(awayTimer);
+  if (!socket || !socket.connected) return;
+  if (document.visibilityState !== 'hidden') { if (awaySent) { awaySent = false; socket.emit('voiceAway', false); } return; }
+  awayTimer = setTimeout(() => {
+    if (document.visibilityState === 'hidden' && socket && socket.connected && !awaySent) { awaySent = true; socket.emit('voiceAway', true); }
+  }, window.__awayMs || 8000);
+}
+document.addEventListener('visibilitychange', syncAway);
 
 // Ana ekrana ekleme (telefon ve bilgisayar tarayıcısı). Masaüstü uygulamasında gerekmez.
 // Servis çalışanı: ana ekrana eklenebilmek, internet yokken sayfanın açılması ve telefonda bildirim göstermek için
